@@ -1,0 +1,12 @@
+# Secrets — never commit
+.mcp.json
+.env
+.claude/settings.local.json
+
+# Local state (snapshots, dedupe, generated briefs)
+state/
+briefs/
+.claude/skills/*/state/
+
+# OS / misc
+.DS_Store
