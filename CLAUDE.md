@@ -76,6 +76,8 @@ See `handoff/00-buildout-handoff-v1.md` for the full chunked build plan.
 |-------|---------|---------|---------|
 | `crm-daily-brief` | Hermes | 6pm Pacific daily | Bookings + summaries + pipeline buckets → Telegram |
 | `crm-appointment-nudge` | Hermes | Hourly (business hours) | Deal stuck in "Appointment Set" 3h+ after appointment → nudge |
+| `crm-appointment-outcome` | Hermes | On-demand (Telegram reply) | Write-back after nudge reply — advance stage, set estimate |
+| `crm-estimate-followup` | Hermes | Daily (10am Pacific) | Estimate unsent or unacknowledged 8+ days → Telegram follow-up + GHL write-back |
 
 More skills (write-back loop, estimate/approved follow-ups, nurture workflow) get built per the handoff.
 
