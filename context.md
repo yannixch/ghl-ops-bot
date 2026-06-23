@@ -13,7 +13,7 @@
 - Other PMs may join later (route Appointment-Set nudges to them too).
 
 ## Pipeline — "Customer Journey" (`zEfi70fS2rNS3wFnYN1a`)
-> Stage IDs verified live 2026-06-21. Pipeline rehaul completed ~2026-06-20 — these IDs are current.
+> Stage IDs verified 2026-06-23 against live GHL. Rehaul removed UNQUALIFIED stage; all other IDs unchanged.
 
 | Stage | ID | Assistant's job |
 |-------|----|-----------------|
@@ -29,7 +29,6 @@
 | In Progress | `1b290a07-0030-4dab-978d-9f90cef3caf1` | — |
 | Completed | `a334ca6d-9084-475e-814b-1a4b3783cc2a` | — |
 | Newsletter | `69ba401f-c601-4401-8191-5da2f721daba` | Empty as of 2026-06-21 — all 90 moved to Reactivation / Proj Completed Nurture |
-| UNQUALIFIED | `f5b211cd-33b7-4594-90ad-6cc2482a6430` | — |
 
 **Other pipelines:** FB API LEADS `D9FwkFcjYFk9O0D7bLoG` · REACTIVATION `mIlo4sfxc8stU3t8qUja`.
 
