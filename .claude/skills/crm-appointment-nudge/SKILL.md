@@ -1,6 +1,6 @@
 ---
 name: crm-appointment-nudge
-description: Pipeline-hygiene watchdog for Paley Renovations. Hourly, finds any opportunity still sitting in the "Appointment Set" stage 3+ hours after its appointment start time — meaning the visit should have happened but the stage was never advanced — and Telegrams Yannis a nudge asking for the outcome (he forwards to Nazar). Read-only against GoHighLevel. Triggers for "appointment nudge", "stale appointment check", "hygiene check", "who didn't update", "appointment set check".
+description: Pipeline-hygiene watchdog for Paley Renovations. Hourly, finds any opportunity still sitting in the "Appointment Set" stage 50+ minutes after its appointment start time — meaning the visit should have happened but the stage was never advanced — and Telegrams Yannis a nudge asking for the outcome (he forwards to Nazar). Read-only against GoHighLevel. Triggers for "appointment nudge", "stale appointment check", "hygiene check", "who didn't update", "appointment set check".
 user-invocable: true
 allowed-tools: [Read, Write, Bash]
 metadata:
@@ -15,7 +15,7 @@ metadata:
 
 # CRM Appointment Nudge — Paley Renovations
 
-**Purpose:** solve the core pain — Nazar (estimator + PM) not advancing the pipeline after appointments. If a deal is **still in "Appointment Set" 3+ hours after the appointment's scheduled start time**, the visit has presumably happened (or was a no-show) and the stage should have moved. This nudges Yannis to chase the update.
+**Purpose:** solve the core pain — Nazar (estimator + PM) not advancing the pipeline after appointments. If a deal is **still in "Appointment Set" 50+ minutes after the appointment's scheduled start time**, the visit has presumably happened (or was a no-show) and the stage should have moved. This nudges Yannis to chase the update.
 
 **Cadence:** runs **hourly during business hours** (TZ-aware). **Read-only** — only output is a Telegram message to Yannis. No writes to GHL.
 
@@ -28,7 +28,7 @@ GHL_MCP            = gohighlevel-paley
 LOCATION_ID        = SBWsCsOvoKci7htWODay
 PIPELINE           = Customer Journey  (id zEfi70fS2rNS3wFnYN1a)
 APPT_SET_STAGE_ID  = 054ba5a3-70d4-42f4-b7fe-08dce954c6df   ← "Appointment Set"
-NUDGE_AFTER_HOURS  = 3                  ← hours past appointment start before nudging
+NUDGE_AFTER_MINUTES = 50                ← minutes past appointment start before nudging
 LOOKBACK_HOURS     = 36                 ← ignore appointments older than this (don't re-litigate history)
 TIMEZONE           = America/Los_Angeles   ← CONFIRM Paley's local timezone
 TELEGRAM_TARGET    = 8519030231   (Yannis / @Yanix_GL — own id = Saved Messages)
@@ -47,7 +47,7 @@ STATE              = state/nudge-dedupe.json   (project root; gitignored)
 
 ### Phase 1 — Find candidate appointments
 1. `calendars_get-calendar-events` for the window `now - LOOKBACK_HOURS` → `now`, in `TIMEZONE`.
-2. Keep appointments where `now - appointmentStart >= NUDGE_AFTER_HOURS hours` (the visit's window has passed).
+2. Keep appointments where `now - appointmentStart >= NUDGE_AFTER_MINUTES minutes` (the visit's window has passed).
 3. Drop appointments whose status is already cancelled/no-show if the event exposes that (those don't need a "did it happen" nudge — but a no-show still left the deal in Appointment Set, so optionally nudge with a "no-show?" framing; default: include them).
 
 ### Phase 2 — Check stage
@@ -63,7 +63,7 @@ For each candidate, join appointment → opportunity:
 ```
 ⏰ Pipeline nudge — appt not updated
 [Contact name] · [kitchen/bath if known]
-Appointment was [day] [time] — 3h+ ago, still in "Appointment Set".
+Appointment was [day] [time] — 50 minutes ago, still in "Appointment Set".
 Did it happen? What's the outcome / next step?
 (Reply with the outcome — soon I'll update the pipeline for you.)
 ```
@@ -82,6 +82,6 @@ The "Reply with the outcome" line seeds the flagship feature: a later version re
 - **Read-only in v1** — only a Telegram message goes out. The PIT has write scopes, but this skill must never call an update tool until Phase 2 is explicitly approved.
 - **First run captures a baseline** so you don't get spammed about historical stale deals.
 - **One nudge per appointment, ever** (state file dedupe). If an appointment is rescheduled and re-stales, that's a new appointment ID → fine.
-- **Timezone governs "3 hours after start"** — use `TIMEZONE`, not UTC.
+- **Timezone governs "50 minutes after start"** — use `TIMEZONE`, not UTC.
 - **No GHL SMS in v1** — routing is Telegram-to-Yannis. When Nazar should get it directly, add an SMS recipient (needs his number + a GHL send path) in a config, not hardcoded.
 - Shares the GHL connection + stage map with [crm-daily-brief]. Keep stage IDs in sync if the pipeline is ever restructured.
