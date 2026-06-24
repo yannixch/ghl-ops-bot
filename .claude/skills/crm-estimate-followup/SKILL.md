@@ -94,7 +94,7 @@ Has it been sent?
 
 **Scenario B message (Pending / Estimate Sent — awaiting decision):**
 ```
-[Contact name]'s estimate has been out for [N] days — any word from them?
+[Contact name]'s estimate has been out for [N] days, any update on the estimate?
 ```
 
 ### Phase 2 — Conversational interview
@@ -251,7 +251,7 @@ Run this check when invoked without a fresh reply (Hermes cron mode):
    - Else if `now - lastFollowUpAt >= FOLLOWUP_INTERVAL_HOURS` (or `lastFollowUpAt` is null and `now - triggerDate >= FOLLOWUP_INTERVAL_HOURS`):
      - Send brief follow-up via Telegram based on scenario:
        - Scenario A: `Still waiting — did [Contact name]'s estimate go out?`
-       - Scenario B: `Still waiting — any word back from [Contact name]?`
+       - Scenario B: `Still waiting — any update on [Contact name]'s estimate?`
      - Increment `followUpCount`, set `lastFollowUpAt = now`.
 
 ---
