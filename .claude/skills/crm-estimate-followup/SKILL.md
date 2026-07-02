@@ -4,22 +4,25 @@ description: Use when following up on estimates that haven't been sent or acknow
 user-invocable: true
 allowed-tools: [Read, Write, Bash]
 metadata:
-  version: 0.2.0
+  version: 0.3.0
   domains: [crm, pipeline-hygiene, gohighlevel, write-back]
   type: utility
   client: paley-renovations
   inputs: [gohighlevel-mcp, telegram-mcp]
   outputs: [telegram-message, ghl-opportunity-update]
-  status: DRAFT
+  status: active
 ---
 
 # CRM Estimate Follow-Up — Paley Renovations
 
-**Purpose:** Daily watchdog that catches estimates stuck unsent or unacknowledged for 8+ days and asks Yannis what's going on. Writes the result back to GHL — no dashboard login needed.
+**Purpose:** Catches estimates stuck unsent or unacknowledged and asks Yannis what's going on. Writes the result back to GHL — no dashboard login needed.
 
-**Trigger:** Runs daily (10am Pacific suggested). Also triggered when Yannis replies to a follow-up message.
+**Scenario A** (Send out Estimate stage): checked daily — estimate not sent is urgent.
+**Scenario B** (Pending / Estimate Sent stage): checked weekly — one consolidated Telegram message, numbered list, Yannis replies with statuses.
 
-**Cadence:** daily scan + on-demand write-back. **Write-enabled.**
+**Trigger:** Daily cron (10am Pacific). Also triggered when Yannis replies to a follow-up message.
+
+**Write-enabled.**
 
 ---
 
@@ -35,33 +38,40 @@ APPROVED_STAGE_ID          = cb5ccf70-9738-47fb-80bc-06c3c3623c97   ← "Approve
 GHOSTING_STAGE_ID          = 3e7608ea-39d0-4fbf-96e8-a3ce3476d785   ← "Ghosting"
 NURTURE_STAGE_ID           = 8d809805-5e66-4f46-99ad-f722b33ff08b   ← "Nurture"
 TELEGRAM_TARGET            = 8519030231   (Yannis / @Yanix_GL — Nazar NOT on Telegram yet)
-STATE                      = state/estimate-followup.json   (project root; gitignored)
+STATE                      = state/estimate-followup.json
 DAYS_THRESHOLD             = 8
-FOLLOWUP_INTERVAL_HOURS    = 3
-MAX_FOLLOWUP_HOURS         = 48
+SCENARIO_B_SWEEP_DAYS      = 7   ← minimum days between Scenario B consolidated messages
+SCENARIO_A_MAX_FOLLOWUP_H  = 48  ← drop Scenario A entry if no reply after 48h
+SCENARIO_A_INTERVAL_H      = 3   ← re-ping Scenario A every 3h until replied or dropped
 ```
 
 ---
 
 ## State schema
 
-Each active conversation is tracked in `STATE` keyed by opportunityId:
-
 ```json
 {
-  "opportunityId": "...",
-  "contactName": "...",
-  "scenario": "A | B",
-  "triggerDate": "ISO timestamp",
-  "followUpCount": 0,
-  "lastFollowUpAt": "ISO timestamp or null",
-  "conversationState": "awaiting_sent | awaiting_amount | awaiting_decision | awaiting_ghosting_action | awaiting_lost_nurture | awaiting_snooze_date | snoozed | complete",
-  "snoozedUntil": "ISO timestamp or null"
+  "_meta": {
+    "lastScenarioBSweepAt": "ISO timestamp or null",
+    "scenarioBList": ["oppId1", "oppId2", ...]
+  },
+  "<opportunityId>": {
+    "opportunityId": "...",
+    "contactName": "...",
+    "monetaryValue": 0,
+    "scenario": "A | B",
+    "triggerDate": "ISO timestamp",
+    "followUpCount": 0,
+    "lastFollowUpAt": "ISO timestamp or null",
+    "conversationState": "awaiting_sent | awaiting_amount | awaiting_decision | awaiting_ghosting_action | awaiting_lost_nurture | awaiting_snooze_date | snoozed | complete",
+    "snoozedUntil": "ISO timestamp or null"
+  }
 }
 ```
 
-Remove entry when `conversationState = complete` or when `now - triggerDate > MAX_FOLLOWUP_HOURS`.
-**Snoozed entries (`conversationState = snoozed`) are exempt from the MAX_FOLLOWUP_HOURS drop** — they re-trigger on `snoozedUntil` instead.
+`_meta.scenarioBList` is the ordered array used for the current consolidated message. Index 0 = lead #1, index 1 = lead #2, etc. Rebuilt each time a new sweep message is sent.
+
+Remove an opportunity entry when `conversationState = complete`. Snoozed entries stay in STATE and re-trigger on `snoozedUntil`.
 
 ---
 
@@ -69,190 +79,151 @@ Remove entry when `conversationState = complete` or when `now - triggerDate > MA
 
 ### Phase 0 — Bootstrap
 1. Confirm `gohighlevel-paley` + `telegram` MCP servers available. If GHL missing → stop with clear error.
-2. Load `STATE`. If file doesn't exist, initialize as `{}`.
-
-### Phase 1 — Scan for stale opportunities (daily cron mode)
-
-**First, check snoozed entries before scanning GHL:**
-- For each entry where `conversationState = snoozed`:
-  - If `now >= snoozedUntil`: reset `conversationState` to the pre-snooze state for that scenario (`awaiting_sent` for Scenario A, `awaiting_decision` for Scenario B), clear `snoozedUntil`, and re-send the original trigger message.
-  - Otherwise: skip (still sleeping).
-
-**Then scan GHL for new candidates:**
-
-1. `opportunities_search-opportunity` filtering by `pipelineId = PIPELINE_ID` and `pipelineStageId = SEND_ESTIMATE_STAGE_ID`. For each result:
-   - If `now - lastStageChangeAt >= DAYS_THRESHOLD days` AND opportunityId not already in STATE → create STATE entry with `scenario = A`, `conversationState = awaiting_sent`, `snoozedUntil = null`, send Scenario A message.
-
-2. Repeat for `pipelineStageId = PENDING_ESTIMATE_STAGE_ID`:
-   - If `now - lastStageChangeAt >= DAYS_THRESHOLD days` AND not in STATE → create entry with `scenario = B`, `conversationState = awaiting_decision`, `snoozedUntil = null`, send Scenario B message.
-
-**Scenario A message (Send out Estimate — estimate not sent):**
-```
-Hey — [Contact name]'s estimate hasn't gone out yet (they've been in this stage for [N] days).
-Has it been sent?
-```
-
-**Scenario B message (Pending / Estimate Sent — awaiting decision):**
-```
-[Contact name]'s estimate has been out for [N] days, any update on the estimate?
-```
-
-### Phase 2 — Conversational interview
-
-**Parse intent from plain English. One clarifying question max per ambiguity. Never guess.**
+2. Load `STATE`. If file doesn't exist, initialize as `{ "_meta": { "lastScenarioBSweepAt": null, "scenarioBList": [] } }`.
 
 ---
 
-#### Scenario A — Estimate not yet sent
+### Phase 1 — Scan (cron mode, no incoming reply)
 
-##### State: `awaiting_sent`
-Waiting for: did the estimate go out?
+#### Step 1a — Wake up snoozed Scenario A entries
+For each STATE entry where `scenario = A` and `conversationState = snoozed`:
+- If `now >= snoozedUntil`: reset `conversationState = awaiting_sent`, clear `snoozedUntil`, reset `triggerDate = now`, send the Scenario A trigger message for that lead.
+- Otherwise: skip.
 
-Parse reply:
-- **Yes, sent** (sent it, went out, yep, she has it, etc.) → set `conversationState = awaiting_amount`, ask amount immediately:
-  ```
-  What's the estimate amount?
-  ```
-- **No, not sent** (not yet, still working on it, haven't sent, etc.) → ask:
-  ```
-  Want me to flag this, or is it being handled?
-  ```
-  Parse:
-  - "will handle / on it / sending soon / I'll do it" → set `conversationState = awaiting_snooze_date`, ask immediately:
-    ```
-    Got it — when should I check back in on this?
-    ```
-  - "drop it / not happening / lost / not pursuing" → set `conversationState = awaiting_lost_nurture`, ask immediately:
-    ```
-    Lost or nurture?
-    ```
-  - Ambiguous → one clarifying follow-up
-- **Lost / not pursuing** (dead, forget it, move on) → set `conversationState = awaiting_lost_nurture`, ask lost/nurture
-- Ambiguous → one clarifying follow-up
+#### Step 1b — Scan GHL for new Scenario A candidates
+`opportunities_search-opportunity` where `pipelineStageId = SEND_ESTIMATE_STAGE_ID`:
+- For each result where `now - lastStageChangeAt >= DAYS_THRESHOLD` AND opportunityId not in STATE:
+  - Add STATE entry: `scenario = A`, `conversationState = awaiting_sent`, `triggerDate = now`.
+  - Send Scenario A trigger message immediately (one per lead — these are urgent).
 
-##### State: `awaiting_amount`
-Parse dollar amount from plain English:
-- "~22k" → 22000
-- "about 15 thousand" → 15000
-- "probably 30" → 30000
-- "not sure yet / TBD / no idea" → proceed without monetary value
-
-**Write to GHL:**
-`opportunities_update-opportunity` → `pipelineStageId = PENDING_ESTIMATE_STAGE_ID`, `status = open`, `monetaryValue = parsed amount` (omit if TBD)
-
-**Telegram confirmation:**
+**Scenario A trigger message:**
 ```
-Got it — moved [Contact name] to Pending / Estimate Sent[, $X]. ✓
+[Contact name]'s estimate hasn't gone out yet ([N] days in Send out Estimate). Has it been sent?
 ```
-`conversationState = complete`, remove from STATE.
+
+#### Step 1c — Scenario B sweep (weekly gate)
+Check `_meta.lastScenarioBSweepAt`. If `now - lastScenarioBSweepAt < SCENARIO_B_SWEEP_DAYS`: skip steps 1c and 1d entirely.
+
+#### Step 1d — Collect Scenario B candidates
+Collect into a single list (do not send individual messages):
+
+1. Snoozed Scenario B entries where `now >= snoozedUntil`:
+   - Reset `conversationState = awaiting_decision`, clear `snoozedUntil`, reset `triggerDate = now`.
+   - Include in this week's list.
+
+2. GHL scan — `opportunities_search-opportunity` where `pipelineStageId = PENDING_ESTIMATE_STAGE_ID`:
+   - For each result where `now - lastStageChangeAt >= DAYS_THRESHOLD` AND opportunityId not in STATE:
+     - Add STATE entry: `scenario = B`, `conversationState = awaiting_decision`, `triggerDate = now`, `monetaryValue = monetaryValue from GHL (0 if unset)`.
+     - Include in this week's list.
+
+If the list is empty: skip. Do not send a message.
+
+If the list has entries:
+- Build `_meta.scenarioBList` from the collected opportunity IDs (in order).
+- Set `_meta.lastScenarioBSweepAt = now`.
+- Send ONE consolidated Telegram message (see format below).
+
+**Scenario B consolidated message format:**
+```
+Estimate check-in — any updates? ([N] leads)
+
+1. [Name] — $[Xk] ([D]d)
+2. [Name] — $[Xk] ([D]d)
+...
+
+Reply: [#] approved / lost / nurture / ghosting / snooze [time]
+Skip any you're not sure on — I'll check back next week.
+```
+
+Format rules:
+- Monetary value: round to nearest $1k, display as `$Xk` (e.g. `$49k`). If 0 or unset, omit the amount.
+- Days: `lastStageChangeAt` to today, rounded down.
+- Numbers are 1-indexed. Pad list with leading numbers only (no extra punctuation).
 
 ---
 
-#### Scenario B — Estimate sent, awaiting decision
+### Phase 2 — Handle Yannis's reply
 
-##### State: `awaiting_decision`
-Waiting for: did they respond?
-
-Parse reply:
-- **Approved / moving forward** (yes, they approved, she wants to go, let's do it, approved, moving forward, etc.) → ask:
-  ```
-  Move them to Approved?
-  ```
-  - "yes / yep / do it" → **Write:** `pipelineStageId = APPROVED_STAGE_ID`, `status = open` → confirm:
-    ```
-    Got it — moved [Contact name] to Approved / to be Scheduled. ✓
-    ```
-    → `conversationState = complete`
-  - Ambiguous → one clarifying follow-up
-
-- **No response / ghosting** (no word, nothing, ghosting, silent, no reply) → ask:
-  ```
-  Want to follow up with them, move to Ghosting, or drop it?
-  ```
-  → set `conversationState = awaiting_ghosting_action`
-
-- **Lost / not pursuing** (dead, not happening, passed, not interested) → set `conversationState = awaiting_lost_nurture`, ask lost/nurture immediately
-
-- Ambiguous → one clarifying follow-up
-
-##### State: `awaiting_ghosting_action`
-Parse reply:
-- **Follow up / reach out** → set `conversationState = awaiting_snooze_date`, ask immediately:
-  ```
-  Got it — when should I check back in on this?
-  ```
-- **Ghosting / move to ghosting** → **Write:** `pipelineStageId = GHOSTING_STAGE_ID`, `status = open` → confirm:
-  ```
-  Got it — moved [Contact name] to Ghosting. ✓
-  ```
-  → `conversationState = complete`
-- **Drop / lost / not happening** → set `conversationState = awaiting_lost_nurture`, ask:
-  ```
-  Lost or nurture?
-  ```
-- Ambiguous → one clarifying follow-up
+Determine mode from context:
+- If there are active Scenario A entries in STATE with `conversationState != snoozed AND != complete` → reply is for Scenario A (per-lead conversation, see Section A below).
+- If `_meta.scenarioBList` is non-empty and there are active Scenario B entries → reply is for Scenario B (batch parse, see Section B below).
+- If both are active: parse which scenario the reply addresses from context (numbered reply = Scenario B; name-based reply = Scenario A).
 
 ---
 
-#### Shared state: `awaiting_snooze_date`
+#### Section A — Scenario A per-lead conversation
 
-Waiting for: when to check back in.
+One active conversation at a time. Use the contact name from STATE to anchor context.
 
-Parse reply as a future date/time from plain English:
+##### `awaiting_sent`
+- **Yes, sent** → set `conversationState = awaiting_amount`, ask: `What's the estimate amount?`
+- **No, not sent / still working on it** → ask: `Got it — when should I check back on this?` → `conversationState = awaiting_snooze_date`
+- **Lost / drop it** → `conversationState = awaiting_lost_nurture`, ask: `Lost or nurture?`
+- Ambiguous → one clarifying question.
+
+##### `awaiting_amount`
+Parse dollar amount from plain English (`~22k` → 22000, `about 15 thousand` → 15000, `TBD / not sure` → omit).
+
+**Write to GHL:** `pipelineStageId = PENDING_ESTIMATE_STAGE_ID`, `status = open`, `monetaryValue` if known.
+
+**Confirm:** `Got it — moved [Name] to Pending / Estimate Sent[$Xk]. ✓`
+→ `conversationState = complete`, remove from STATE.
+
+---
+
+#### Section B — Scenario B batch reply
+
+Parse one or more numbered statuses from the reply. Examples:
+- `1 approved` → lead #1 approved
+- `3 lost, 5 snooze 2 weeks, 7 ghosting` → three updates in one message
+- `2 nurture` → lead #2 to nurture
+
+For each parsed update, look up the opportunity via `_meta.scenarioBList[index - 1]`.
+
+**Status actions:**
+
+| Reply | GHL write | Confirm |
+|-------|-----------|---------|
+| approved | `pipelineStageId = APPROVED_STAGE_ID`, `status = open` | `[Name] → Approved ✓` |
+| lost | `status = lost` | `[Name] → Lost ✓` |
+| nurture | `pipelineStageId = NURTURE_STAGE_ID`, `status = open` | `[Name] → Nurture ✓` |
+| ghosting | `pipelineStageId = GHOSTING_STAGE_ID`, `status = open` | `[Name] → Ghosting ✓` |
+| snooze [time] | parse date, set `snoozedUntil`, `conversationState = snoozed` | `[Name] → snoozed until [date] ✓` |
+
+Send ONE confirmation message covering all updates processed in the reply:
+```
+Done —
+- Tina Rice → Approved ✓
+- Pat Lords → Ghosting ✓
+- Colby Johnson → snoozed until Jul 13 ✓
+```
+
+Entries not mentioned: leave as-is (`conversationState = awaiting_decision`). They'll be included in next week's sweep if still unresolved.
+
+**Snooze date parsing:**
 - "in 3 days" → now + 3 days
 - "next Tuesday" → upcoming Tuesday at 10am Pacific
-- "a week" / "give me a week" → now + 7 days
+- "a week / give me a week" → now + 7 days
 - "end of the week" → upcoming Friday at 10am Pacific
 - "tomorrow" → tomorrow at 10am Pacific
-- "never / forget it / drop it" → treat as intent to abandon; ask "Lost or nurture?" instead
+- Unparseable → one clarifying question: `When should I check back on [Name]? (e.g. "in 3 days", "next Tuesday")`
 
-If parsed successfully:
-- Set `snoozedUntil = resolved ISO timestamp`, `conversationState = snoozed`
-- Confirm:
-  ```
-  Got it — I'll check back on [Contact name] on [date]. ✓
-  ```
-- Do NOT remove from STATE (entry stays to re-trigger on `snoozedUntil`).
-
-If reply is ambiguous or unparseable → one clarifying follow-up:
-```
-When exactly should I follow up? (e.g. "in 3 days", "next Tuesday")
-```
+If a snooze entry re-triggers: reset `triggerDate = now` so state is fresh.
 
 ---
 
-#### Shared state: `awaiting_lost_nurture`
+### Phase 3 — Scenario A follow-up cadence (no reply received)
 
-Ask:
-```
-Lost or nurture?
-```
-Parse reply:
-- Lost (dead, close it, gone, not happening, etc.) → **Write:** `status = lost` → confirm:
-  ```
-  Got it — marked [Contact name] as lost. ✓
-  ```
-  → `conversationState = complete`
-- Nurture (keep warm, follow up later, nurture, not now, etc.) → **Write:** `pipelineStageId = NURTURE_STAGE_ID`, `status = open` → confirm:
-  ```
-  Got it — moved [Contact name] to Nurture. ✓
-  ```
-  → `conversationState = complete`
-- Ambiguous → one clarifying follow-up
+Only applies to Scenario A entries. Run during daily cron after Phase 1:
 
----
-
-### Phase 3 — Follow-up cadence (no response received)
-
-Run this check when invoked without a fresh reply (Hermes cron mode):
-1. Load `STATE`, find entries where `conversationState != complete` AND `conversationState != snoozed`.
-2. For each entry:
-   - If `now - triggerDate > MAX_FOLLOWUP_HOURS`: remove entry silently. Do not ping Yannis.
-   - Else if `now - lastFollowUpAt >= FOLLOWUP_INTERVAL_HOURS` (or `lastFollowUpAt` is null and `now - triggerDate >= FOLLOWUP_INTERVAL_HOURS`):
-     - Send brief follow-up via Telegram based on scenario:
-       - Scenario A: `Still waiting — did [Contact name]'s estimate go out?`
-       - Scenario B: `Still waiting — any update on [Contact name]'s estimate?`
+1. Find Scenario A entries where `conversationState != complete AND != snoozed`.
+2. For each:
+   - If `now - triggerDate > SCENARIO_A_MAX_FOLLOWUP_H`: remove entry silently. Do not ping Yannis.
+   - Else if `now - lastFollowUpAt >= SCENARIO_A_INTERVAL_H` (or `lastFollowUpAt` is null and `now - triggerDate >= SCENARIO_A_INTERVAL_H`):
+     - Send: `Still waiting — did [Name]'s estimate go out?`
      - Increment `followUpCount`, set `lastFollowUpAt = now`.
+
+Scenario B entries do NOT get follow-up pings between weekly sweeps. They wait for the next sweep.
 
 ---
 
@@ -270,21 +241,18 @@ Run this check when invoked without a fresh reply (Hermes cron mode):
 
 ## Safety
 
-- Always confirm opportunity ID before writing. Search + confirm if context is ambiguous.
-- If GHL update fails, log error in STATE and tell Yannis via Telegram what went wrong. Never swallow errors silently.
-- Never update an opportunity not in STATE as an active conversation.
-- The 48-hour drop window is measured from `triggerDate` and does NOT apply to snoozed entries.
+- Always confirm opportunity ID via `_meta.scenarioBList` before writing. Never write based on name alone.
+- If a GHL update fails: log error in STATE entry, tell Yannis via Telegram what failed and which lead. Never swallow errors silently.
+- Never update an opportunity not in STATE.
 - Yannis is the only recipient. Nazar is NOT on Telegram yet.
-- Skip an opportunity in STATE if it already has `conversationState = complete` — do not re-trigger.
-- When a snoozed entry re-triggers, reset `triggerDate = now` so the 48-hour drop window is fresh.
+- Scenario B entries do NOT have a `MAX_FOLLOWUP_HOURS` drop window — they persist in STATE until resolved or snoozed.
 
 ---
 
 ## Notes
 
-- **Write-enabled** — makes live GHL updates. Double-check opportunity ID before every write.
-- **LLM-native parsing** — no regex required. Parse intent from plain English. One clarifying question max per ambiguity.
-- **Runs daily** (not hourly — 8-day threshold checks don't need hourly cadence). Suggested: separate cron at 10am Pacific, or append to daily brief cron.
-- **Snooze re-trigger resets the drop window** — `triggerDate` is updated on wake-up so the 48h cadence is measured from the new conversation, not the original.
-- **Shares stage IDs** with `crm-appointment-nudge`, `crm-appointment-outcome`, and `crm-daily-brief`. Keep in sync if pipeline is restructured.
-- **Future:** when Nazar joins Telegram, add him as `TELEGRAM_TARGET_NAZAR` in constants, not hardcoded in message logic.
+- **Write-enabled** — makes live GHL updates.
+- **LLM-native parsing** — no regex. Parse intent from plain English. One clarifying question max per ambiguity.
+- **Scenario B is weekly, Scenario A is daily** — the daily cron runs both, but the skill gates Scenario B behind the 7-day check.
+- **Batch reply is the primary UX for Scenario B** — Yannis sees one message, replies once, everything gets written. Unlisted leads wait for next week.
+- **Future:** when Nazar joins Telegram, add him as `TELEGRAM_TARGET_NAZAR`. Do not hardcode in message logic.
